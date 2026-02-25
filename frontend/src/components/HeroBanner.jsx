@@ -46,7 +46,7 @@ export default function HeroBanner({ movies }) {
       {/* BG */}
       <img
         key={featured.id}
-        src={featured.logo}
+        src={featured.backdrop || featured.logo}
         alt=""
         style={{
           position: "absolute", inset: 0,

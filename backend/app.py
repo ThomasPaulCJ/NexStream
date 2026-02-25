@@ -1,109 +1,85 @@
-"""
-Netflix Clone - Flask Backend
-Exposes:
-  GET  /movies          -> List all 9 movies
-  POST /play/<movieId>  -> Simulate playback start (log + status change)
-"""
-
-import json
-import logging
-from datetime import datetime
-from pathlib import Path
-
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+import json, os, urllib.request, urllib.parse
 
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"])
+CORS(app)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger(__name__)
+# ── TMDB config ──────────────────────────────────────────────────────────────
+TMDB_KEY  = "2dca580c2a14b55200e784d157207b4d"   # public demo key (read-only)
+TMDB_BASE = "https://api.themoviedb.org/3"
+IMG_BASE  = "https://image.tmdb.org/t/p"
 
-playback_log = []
-movie_status = {}
+MOVIES_FILE = os.path.join(os.path.dirname(__file__), "movies.json")
 
-
-def load_movies():
-    data_path = Path(__file__).parent / "movies.json"
-    with open(data_path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
-
-
-def get_movie_by_id(movie_id):
-    movies = load_movies()
-    return next((m for m in movies if m["id"] == movie_id), None)
-
-
-@app.get("/movies")
-def list_movies():
+def tmdb_get(path, params=None):
+    """Call TMDB API and return parsed JSON."""
+    p = {"api_key": TMDB_KEY}
+    if params: p.update(params)
+    url = f"{TMDB_BASE}{path}?{urllib.parse.urlencode(p)}"
     try:
-        movies = load_movies()
-        for movie in movies:
-            movie["status"] = movie_status.get(movie["id"], movie.get("status", "available"))
-        logger.info("GET /movies -> returning %d movies", len(movies))
-        return jsonify({"success": True, "count": len(movies), "movies": movies}), 200
-    except FileNotFoundError:
-        logger.error("movies.json not found")
-        return jsonify({"success": False, "error": "Movie database unavailable"}), 500
-    except json.JSONDecodeError as exc:
-        logger.error("JSON parse error: %s", exc)
-        return jsonify({"success": False, "error": "Corrupted movie database"}), 500
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        resp = urllib.request.urlopen(req, timeout=6)
+        return json.loads(resp.read())
+    except Exception as e:
+        print(f"TMDB error: {e}")
+        return {}
 
+def enrich_movie(movie):
+    """Fetch live poster, backdrop, and trailer from TMDB using imdbId."""
+    imdb_id = movie.get("imdbId")
+    if not imdb_id:
+        return movie
 
-@app.post("/play/<movie_id>")
+    # Find TMDB id from imdb id
+    find = tmdb_get(f"/find/{imdb_id}", {"external_source": "imdb_id"})
+    results = find.get("movie_results", [])
+    if not results:
+        return movie
+
+    tmdb_movie = results[0]
+    tmdb_id = tmdb_movie["id"]
+
+    # Poster & backdrop
+    poster   = tmdb_movie.get("poster_path")
+    backdrop = tmdb_movie.get("backdrop_path")
+    if poster:
+        movie["logo"] = f"{IMG_BASE}/w500{poster}"
+    if backdrop:
+        movie["backdrop"] = f"{IMG_BASE}/w1280{backdrop}"
+
+    # Trailer (official YouTube)
+    videos = tmdb_get(f"/movie/{tmdb_id}/videos")
+    trailer_id = None
+    for v in videos.get("results", []):
+        if v.get("site") == "YouTube" and v.get("type") == "Trailer" and v.get("official"):
+            trailer_id = v["key"]
+            break
+    # Fallback: any YouTube trailer
+    if not trailer_id:
+        for v in videos.get("results", []):
+            if v.get("site") == "YouTube" and v.get("type") == "Trailer":
+                trailer_id = v["key"]
+                break
+    if trailer_id:
+        movie["trailerYoutubeId"] = trailer_id
+
+    return movie
+
+@app.route("/movies", methods=["GET"])
+def get_movies():
+    with open(MOVIES_FILE) as f:
+        movies = json.load(f)
+
+    enriched = []
+    for m in movies:
+        enriched.append(enrich_movie(dict(m)))
+
+    return jsonify({"movies": enriched})
+
+@app.route("/api/movies/<movie_id>/play", methods=["POST"])
 def play_movie(movie_id):
-    movie = get_movie_by_id(movie_id)
-    if movie is None:
-        logger.warning("POST /play/%s -> 404 Not Found", movie_id)
-        return jsonify({"success": False, "error": f"Movie with id '{movie_id}' not found"}), 404
-
-    for mid in movie_status:
-        if movie_status[mid] == "playing":
-            movie_status[mid] = "available"
-    movie_status[movie_id] = "playing"
-
-    event = {
-        "movieId": movie_id,
-        "movieName": movie["name"],
-        "streamUrl": movie["streamUrl"],
-        "startedAt": datetime.utcnow().isoformat() + "Z",
-        "client_ip": request.remote_addr,
-    }
-    playback_log.append(event)
-    logger.info("PLAYBACK STARTED | id=%s | name=%s | client=%s", movie_id, movie["name"], request.remote_addr)
-
-    return jsonify({
-        "success": True,
-        "message": f"Playback started for '{movie['name']}'",
-        "movie": {**movie, "status": "playing"},
-        "streamUrl": movie["streamUrl"],
-        "startedAt": event["startedAt"],
-    }), 200
-
-
-@app.get("/playback-log")
-def get_playback_log():
-    return jsonify({"success": True, "count": len(playback_log), "log": playback_log}), 200
-
-
-@app.errorhandler(404)
-def not_found(exc):
-    return jsonify({"success": False, "error": "Route not found"}), 404
-
-@app.errorhandler(405)
-def method_not_allowed(exc):
-    return jsonify({"success": False, "error": "Method not allowed"}), 405
-
-@app.errorhandler(500)
-def internal_error(exc):
-    logger.exception("Unhandled server error")
-    return jsonify({"success": False, "error": "Internal server error"}), 500
-
+    return jsonify({"status": "ok", "movie_id": movie_id})
 
 if __name__ == "__main__":
-    logger.info("Netflix Clone API starting on http://localhost:5000")
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="127.0.0.1", port=5000, debug=True)

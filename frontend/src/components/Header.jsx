@@ -3,10 +3,10 @@ import { useApp } from "../context/AppContext"
 import ProfileModal from "./ProfileModal"
 
 const NAV_ITEMS = [
-  { id: "home",    label: "Home" },
-  { id: "movies",  label: "Movies" },
-  { id: "series",  label: "Series" },
-  { id: "mylist",  label: "My List" },
+  { id: "home", label: "Home" },
+  { id: "movies", label: "Movies" },
+  { id: "series", label: "Series" },
+  { id: "mylist", label: "My List" },
 ]
 
 export default function Header() {
